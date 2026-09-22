@@ -3,28 +3,73 @@ import path from "path";
 import fs from "fs";
 import { imageSize } from "image-size";
 
-const TEMPLATE_PATH = path.join(process.cwd(), "data", "template.xlsx");
-
-// Соответствие: колонка источника -> колонка шаблона
-const COLUMN_MAPPING: Record<string, string> = {
-  "Фото товара / \n产品照片": "ФОТО",
-  "Наименование": "Наименование товара",
-  "полный состав материалов / \n材料清单（完整清单）":
-    "Технические характеристики товара (материал, тех.данные, конструктивные особенности и т.д.)",
-  "Описание применения / \n描述、用途、使用场所": "Область применения",
-  "Торговая марка \n品牌名称": "Торговая марка",
-  "Артикул \n产品货号": "Артикул (если есть)",
-  "Количество \n数量": "Кол-во шт.",
-  "Вес брутто \n毛重 ": "Общий вес брутто (кг)",
-  "Закупочная цена за штуку, юани \n每件购买价格": "Цена за ед., CNY",
-  "Общая закупочная цена, юани\n总购买价格": "Сумма, CNY",
-  "метры кубические груза / \n立方米货物": "Объем (м3)",
-};
-
 const SOURCE_HEADER_MARKER = "Наименование";
-const TEMPLATE_HEADER_MARKER = "ФОТО";
 const SOURCE_PHOTO_COLUMN = "Фото товара / \n产品照片";
 const MAX_HEADER_SCAN_ROWS = 15;
+
+export interface TemplateProfile {
+  /** Ключ профиля, используется в API как ?target=<id> */
+  id: string;
+  /** Название результата для пользователя (без расширения) */
+  outputName: string;
+  /** Путь к файлу шаблона на диске */
+  templatePath: string;
+  /** Текст маркера, по которому ищется строка заголовков в шаблоне */
+  templateHeaderMarker: string;
+  /** Соответствие: заголовок в источнике -> заголовок в шаблоне */
+  columnMapping: Record<string, string>;
+  /** Заголовок колонки для фото в шаблоне (если есть) */
+  photoColumnName?: string;
+}
+
+export const SPECIFICATION_PROFILE: TemplateProfile = {
+  id: "priority",
+  outputName: "Приоритет",
+  templatePath: path.join(process.cwd(), "data", "template.xlsx"),
+  templateHeaderMarker: "ФОТО",
+  photoColumnName: "ФОТО",
+  columnMapping: {
+    "Фото товара / \n产品照片": "ФОТО",
+    "Наименование": "Наименование товара",
+    "полный состав материалов / \n材料清单（完整清单）":
+      "Технические характеристики товара (материал, тех.данные, конструктивные особенности и т.д.)",
+    "Описание применения / \n描述、用途、使用场所": "Область применения",
+    "Торговая марка \n品牌名称": "Торговая марка",
+    "Артикул \n产品货号": "Артикул (если есть)",
+    "Количество \n数量": "Кол-во шт.",
+    "Вес брутто \n毛重 ": "Общий вес брутто (кг)",
+    "Закупочная цена за штуку, юани \n每件购买价格": "Цена за ед., CNY",
+    "Общая закупочная цена, юани\n总购买价格": "Сумма, CNY",
+    "метры кубические груза / \n立方米货物": "Объем (м3)",
+  },
+};
+
+export const BITRIX_PROFILE: TemplateProfile = {
+  id: "bitrix",
+  outputName: "Битрикс",
+  templatePath: path.join(process.cwd(), "data", "bitrix-template.xlsx"),
+  templateHeaderMarker: "Наименование",
+  photoColumnName: "Фото товара",
+  columnMapping: {
+    "Наименование": "Наименование",
+    "Фото товара / \n产品照片": "Фото товара",
+    "Китайское наименование товара / \n中文产品名称": "Китайское наименование товара",
+    "полный состав материалов / \n材料清单（完整清单）": "Материал",
+    "Описание применения / \n描述、用途、使用场所": "Описание",
+    "Ед. измерения    计量单位": "Ед. измерения",
+    "Количество \n数量": "Количество",
+    "Вес брутто \n毛重 ": "Вес брутто",
+    "Торговая марка \n品牌名称": "Торговая марка",
+    "Артикул \n产品货号": "Артикул",
+    "Общая закупочная цена, юани\n总购买价格": "Общая закупочная цена $",
+    "Закупочная цена за штуку, юани \n每件购买价格": "Закупочная цена за штуку $",
+  },
+};
+
+export const TEMPLATE_PROFILES: TemplateProfile[] = [
+  SPECIFICATION_PROFILE,
+  BITRIX_PROFILE,
+];
 
 function normalize(value: unknown): string | null {
   if (value === null || value === undefined) return null;
@@ -100,10 +145,12 @@ export interface TransferResult {
   buffer: Buffer;
   rowsTransferred: number;
   photosTransferred: number;
+  outputName: string;
 }
 
-export async function transferSpecification(
-  sourceBuffer: Buffer
+export async function transferToTemplate(
+  sourceBuffer: Buffer,
+  profile: TemplateProfile
 ): Promise<TransferResult> {
   const sourceWb = new ExcelJS.Workbook();
   // exceljs ships its own (older) @types/node Buffer type which can mismatch
@@ -115,16 +162,19 @@ export async function transferSpecification(
   const sourceHeaderRow = findHeaderRow(sourceWs, SOURCE_HEADER_MARKER);
   const sourceCols = buildColumnIndex(sourceWs, sourceHeaderRow);
 
-  const templateBuffer = fs.readFileSync(TEMPLATE_PATH);
+  const templateBuffer = fs.readFileSync(profile.templatePath);
   const templateWb = new ExcelJS.Workbook();
   await templateWb.xlsx.load(templateBuffer as never);
   const templateWs = templateWb.worksheets[0];
   if (!templateWs) throw new Error("В шаблоне не найдено листов");
 
-  const templateHeaderRow = findHeaderRow(templateWs, TEMPLATE_HEADER_MARKER);
+  const templateHeaderRow = findHeaderRow(
+    templateWs,
+    profile.templateHeaderMarker
+  );
   const templateCols = buildColumnIndex(templateWs, templateHeaderRow);
 
-  const missingTargets = Object.values(COLUMN_MAPPING).filter(
+  const missingTargets = Object.values(profile.columnMapping).filter(
     (name) => !templateCols.has(name)
   );
   if (missingTargets.length > 0) {
@@ -151,7 +201,9 @@ export async function transferSpecification(
     return anchorRow < dataStartRow;
   });
 
-  const photoTemplateCol = templateCols.get("ФОТО");
+  const photoTemplateCol = profile.photoColumnName
+    ? templateCols.get(profile.photoColumnName)
+    : undefined;
   const photoSourceCol = sourceCols.get(SOURCE_PHOTO_COLUMN);
 
   // Индексируем изображения источника по номеру строки (в колонке "Фото товара")
@@ -202,7 +254,9 @@ export async function transferSpecification(
     if (isRowEmpty(srcRow)) continue;
 
     let wroteAny = false;
-    for (const [sourceColName, templateColName] of Object.entries(COLUMN_MAPPING)) {
+    for (const [sourceColName, templateColName] of Object.entries(
+      profile.columnMapping
+    )) {
       const sourceColIdx = sourceCols.get(sourceColName);
       if (!sourceColIdx) continue;
       const value = cellPlainValue(srcRow.getCell(sourceColIdx));
@@ -235,5 +289,22 @@ export async function transferSpecification(
   }
 
   const outBuffer = await templateWb.xlsx.writeBuffer();
-  return { buffer: outBuffer as never, rowsTransferred, photosTransferred };
+  return {
+    buffer: outBuffer as never,
+    rowsTransferred,
+    photosTransferred,
+    outputName: profile.outputName,
+  };
+}
+
+export async function transferSpecification(
+  sourceBuffer: Buffer
+): Promise<TransferResult> {
+  return transferToTemplate(sourceBuffer, SPECIFICATION_PROFILE);
+}
+
+export async function transferBitrix(
+  sourceBuffer: Buffer
+): Promise<TransferResult> {
+  return transferToTemplate(sourceBuffer, BITRIX_PROFILE);
 }

@@ -2,54 +2,76 @@
 
 import { useRef, useState } from "react";
 
+type TargetResult = { name: string; rows: number; photos: number };
+
 type Status =
   | { kind: "idle" }
   | { kind: "loading" }
-  | { kind: "success"; rows: number; photos: number }
+  | { kind: "success"; results: TargetResult[] }
   | { kind: "error"; message: string };
+
+const TARGETS = [
+  { id: "priority", label: "Приоритет" },
+  { id: "bitrix", label: "Битрикс" },
+];
 
 export default function Home() {
   const [status, setStatus] = useState<Status>({ kind: "idle" });
   const [fileName, setFileName] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  async function fetchAndDownload(
+    file: File,
+    target: string
+  ): Promise<TargetResult> {
+    const formData = new FormData();
+    formData.append("file", file);
+
+    const res = await fetch(`/api/transfer?target=${target}`, {
+      method: "POST",
+      body: formData,
+    });
+
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error ?? `Ошибка сервера (${res.status})`);
+    }
+
+    const rows = Number(res.headers.get("X-Rows-Transferred") ?? 0);
+    const photos = Number(res.headers.get("X-Photos-Transferred") ?? 0);
+    const disposition = res.headers.get("Content-Disposition") ?? "";
+    const nameMatch = disposition.match(/filename\*=UTF-8''([^;]+)/);
+    const name = nameMatch
+      ? decodeURIComponent(nameMatch[1])
+      : `${target}.xlsx`;
+
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+
+    return { name, rows, photos };
+  }
+
   async function handleFile(file: File) {
     setFileName(file.name);
     setStatus({ kind: "loading" });
 
-    const formData = new FormData();
-    formData.append("file", file);
-
     try {
-      const res = await fetch("/api/transfer", {
-        method: "POST",
-        body: formData,
+      const results = await Promise.all(
+        TARGETS.map((t) => fetchAndDownload(file, t.id))
+      );
+      setStatus({ kind: "success", results });
+    } catch (err) {
+      setStatus({
+        kind: "error",
+        message: err instanceof Error ? err.message : "Не удалось обработать файл.",
       });
-
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setStatus({
-          kind: "error",
-          message: data.error ?? `Ошибка сервера (${res.status})`,
-        });
-        return;
-      }
-
-      const rows = Number(res.headers.get("X-Rows-Transferred") ?? 0);
-      const photos = Number(res.headers.get("X-Photos-Transferred") ?? 0);
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "Спецификация_Готовая.xlsx";
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-
-      setStatus({ kind: "success", rows, photos });
-    } catch {
-      setStatus({ kind: "error", message: "Не удалось обработать файл." });
     }
   }
 
@@ -68,8 +90,8 @@ export default function Home() {
           </h1>
           <p className="mt-2 text-sm leading-6 text-zinc-600 dark:text-zinc-400">
             Загрузите расчётную Excel-таблицу — данные и фото товаров
-            автоматически перенесутся в шаблон спецификации, и готовый файл
-            сразу скачается.
+            автоматически перенесутся сразу в два готовых файла (Приоритет и
+            Битрикс), которые скачаются один за другим.
           </p>
         </div>
 
@@ -111,9 +133,13 @@ export default function Home() {
         )}
 
         {status.kind === "success" && (
-          <div className="rounded-xl border border-green-200 bg-green-50 px-4 py-3 text-center text-sm text-green-800 dark:border-green-900 dark:bg-green-950 dark:text-green-300">
-            Готово! Перенесено строк: {status.rows}, фотографий:{" "}
-            {status.photos}. Файл скачан.
+          <div className="flex flex-col gap-2 rounded-xl border border-green-200 bg-green-50 px-4 py-3 text-center text-sm text-green-800 dark:border-green-900 dark:bg-green-950 dark:text-green-300">
+            <span>Готово! Скачано {status.results.length} файла:</span>
+            {status.results.map((r) => (
+              <span key={r.name}>
+                {r.name} — строк: {r.rows}, фото: {r.photos}
+              </span>
+            ))}
           </div>
         )}
 

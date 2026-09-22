@@ -1,10 +1,27 @@
 import { NextRequest, NextResponse } from "next/server";
-import { transferSpecification } from "@/lib/transfer";
+import {
+  transferToTemplate,
+  TEMPLATE_PROFILES,
+  type TemplateProfile,
+} from "@/lib/transfer";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
+function resolveProfile(req: NextRequest): TemplateProfile | null {
+  const target = req.nextUrl.searchParams.get("target") ?? "priority";
+  return TEMPLATE_PROFILES.find((p) => p.id === target) ?? null;
+}
+
 export async function POST(req: NextRequest) {
+  const profile = resolveProfile(req);
+  if (!profile) {
+    return NextResponse.json(
+      { error: "Неизвестный целевой шаблон (target)." },
+      { status: 400 }
+    );
+  }
+
   let formData: FormData;
   try {
     formData = await req.formData();
@@ -28,7 +45,8 @@ export async function POST(req: NextRequest) {
   const buffer = Buffer.from(arrayBuffer);
 
   try {
-    const result = await transferSpecification(buffer);
+    const result = await transferToTemplate(buffer, profile);
+    const filename = `${result.outputName}.xlsx`;
     return new NextResponse(new Uint8Array(result.buffer), {
       status: 200,
       headers: {
@@ -36,7 +54,7 @@ export async function POST(req: NextRequest) {
           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "Content-Disposition":
           "attachment; filename=\"Specification.xlsx\"; filename*=UTF-8''" +
-          encodeURIComponent("Спецификация_Готовая.xlsx"),
+          encodeURIComponent(filename),
         "X-Rows-Transferred": String(result.rowsTransferred),
         "X-Photos-Transferred": String(result.photosTransferred),
       },
