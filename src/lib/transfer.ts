@@ -6,6 +6,13 @@ import { imageSize } from "image-size";
 const SOURCE_HEADER_MARKER = "Наименование";
 const SOURCE_PHOTO_COLUMN = "Фото товара / \n产品照片";
 const MAX_HEADER_SCAN_ROWS = 15;
+// Максимальный размер вставляемого фото в пикселях — исходные фото из
+// источника часто в разы больше ячейки (сотни px), из-за чего картинка
+// перекрывает соседние колонки/строки. Вписываем с сохранением пропорций.
+const MAX_PHOTO_DIMENSION_PX = 110;
+// 1pt = 4/3 px (96dpi); немного запаса, чтобы фото не обрезалось по высоте.
+const PX_TO_PT = 0.75;
+const ROW_HEIGHT_PADDING_PT = 4;
 
 export interface TemplateProfile {
   /** Ключ профиля, используется в API как ?target=<id> */
@@ -181,6 +188,16 @@ export async function transferToTemplate(
     throw new Error(`Не найдены столбцы шаблона: ${missingTargets.join(", ")}`);
   }
 
+  // Удаляем структурированные таблицы (Excel Table/ListObject) шаблона:
+  // exceljs при пересохранении теряет часть tableColumns (в частности,
+  // колонки с calculatedColumnFormula), из-за чего ref таблицы перестаёт
+  // совпадать с количеством описанных колонок и Excel требует "восстановить"
+  // файл при открытии. Сами данные и форматирование ячеек не завязаны на
+  // наличие Table, поэтому просто убираем определение таблицы целиком.
+  for (const table of templateWs.getTables() as unknown as { name: string }[]) {
+    templateWs.removeTable(table.name);
+  }
+
   // Очищаем демонстрационные строки шаблона (ниже заголовка)
   const dataStartRow = templateHeaderRow + 1;
   const lastTemplateRow = Math.max(templateWs.rowCount, dataStartRow + 20);
@@ -206,6 +223,17 @@ export async function transferToTemplate(
     : undefined;
   const photoSourceCol = sourceCols.get(SOURCE_PHOTO_COLUMN);
 
+  // Ширина колонки для фото (в px) — фото не должно быть шире самой колонки,
+  // иначе оно наезжает на соседнюю. Приблизительный перевод из "символов"
+  // ширины Excel-колонки в пиксели при стандартном шрифте.
+  const photoColWidthPx = photoTemplateCol
+    ? Math.round((templateWs.getColumn(photoTemplateCol).width ?? 8.43) * 7 + 5)
+    : MAX_PHOTO_DIMENSION_PX;
+  const maxPhotoWidthPx = Math.max(
+    30,
+    Math.min(MAX_PHOTO_DIMENSION_PX, photoColWidthPx - 6)
+  );
+
   // Индексируем изображения источника по номеру строки (в колонке "Фото товара")
   const photosByRow = new Map<
     number,
@@ -220,15 +248,21 @@ export async function transferToTemplate(
       const item = media[Number(img.imageId)];
       if (!item) continue;
       const ext = item.extension as "jpeg" | "png" | "gif";
-      // Размещаем фото в исходном пиксельном разрешении (как в Excel-файле
-      // источника), а не по маленькому отображаемому размеру привязки ячейки.
-      let width = 120;
-      let height = 120;
+      // Берём исходное пиксельное разрешение, но вписываем в разумный
+      // максимум с сохранением пропорций — иначе фото перекрывает соседние
+      // ячейки таблицы.
+      let width = maxPhotoWidthPx;
+      let height = MAX_PHOTO_DIMENSION_PX;
       try {
         const dims = imageSize(item.buffer as never);
         if (dims.width && dims.height) {
-          width = dims.width;
-          height = dims.height;
+          const scale = Math.min(
+            1,
+            maxPhotoWidthPx / dims.width,
+            MAX_PHOTO_DIMENSION_PX / dims.height
+          );
+          width = Math.round(dims.width * scale);
+          height = Math.round(dims.height * scale);
         }
       } catch {
         // не удалось определить размер — используем значение по умолчанию
@@ -277,6 +311,13 @@ export async function transferToTemplate(
           tl: { col: photoTemplateCol - 1, row: outRow - 1 },
           ext: { width: photo.width, height: photo.height },
         });
+        // Подгоняем высоту строки под фото, чтобы оно не перекрывало
+        // соседние строки (но не уменьшаем, если строка уже выше).
+        const neededRowHeight = photo.height * PX_TO_PT + ROW_HEIGHT_PADDING_PT;
+        const outRowRef = templateWs.getRow(outRow);
+        if (!outRowRef.height || outRowRef.height < neededRowHeight) {
+          outRowRef.height = neededRowHeight;
+        }
         photosTransferred++;
         wroteAny = true;
       }
