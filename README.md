@@ -51,3 +51,5 @@ vercel --prod
 
 Специальная конфигурация не требуется — обработка идёт в обычной Node.js
 serverless-функции (`export const runtime = "nodejs"` в API-роуте).
+
+_Автодеплой подключён: пуш в main -> продакшн на Vercel._
